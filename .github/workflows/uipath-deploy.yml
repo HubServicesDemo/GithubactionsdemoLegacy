@@ -84,8 +84,21 @@ jobs:
         run: |
           $pkg = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'package') -Filter *.nupkg | Select-Object -First 1
           if (-not $pkg) { Write-Error "No .nupkg found"; exit 1 }
-          uip or packages upload $pkg.FullName
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $out  = uip or packages upload $pkg.FullName
+          $code = $LASTEXITCODE
+          $text = ($out -join "`n")
+          Write-Host $text
+
+          if ($code -ne 0) {
+            # Same version already in this tenant's feed (re-run, or several environments
+            # sharing one tenant): the package is identical, so continue with the deploy.
+            if ($text -match 'HTTP 409' -or $text -match 'already exists') {
+              Write-Host "Package $($pkg.Name) is already in this tenant's feed - continuing."
+            } else {
+              exit $code
+            }
+          }
 
       - name: Create or update process
         run: |
