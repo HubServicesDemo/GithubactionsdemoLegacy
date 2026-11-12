@@ -120,10 +120,14 @@ jobs:
       # and nothing is packed or deployed.
       - name: Analyze project (old CLI)
         if: env.STAGE != '1-install'
+        env:
+          # The old CLI reads the same variable but only accepts true/false (not 1)
+          UIPATH_TELEMETRY_DISABLED: 'true'
         run: |
           $result = Join-Path $env:RUNNER_TEMP 'analyzer-results.json'
           $a = @('package', 'analyze', (Join-Path $pwd 'project.json'),
                  '--analyzerTraceLevel', 'Error',
+                 '--stopOnRuleViolation',
                  '--resultPath', $result)
           if ($env:UIPATH_GOVERNANCE_FILE) { $a += @('--governanceFilePath', (Join-Path $pwd $env:UIPATH_GOVERNANCE_FILE)) }
 
