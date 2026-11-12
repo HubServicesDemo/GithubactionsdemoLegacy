@@ -17,6 +17,7 @@
 #               UIP_PROJECT_TYPE     = Modern | Legacy   (optional, default Modern)
 #               UIPCLI_OLD_VERSION   = <optional: pin the old CLI version; empty = latest>
 #               UIP_GOVERNANCE_FILE  = <optional: path to a governance policy .json in the repo>
+#               UIP_IGNORED_RULES    = <optional: comma-separated rule IDs to skip, e.g. ST-USG-034>
 #   Secrets   : UIP_CLIENT_ID        = <External App ID>
 #               UIP_CLIENT_SECRET    = <External App secret>
 
@@ -49,6 +50,7 @@ env:
   UIPATH_TENANT: ${{ vars.UIP_TENANT }}
   UIPATH_FOLDER: ${{ vars.UIP_FOLDER }}
   UIPATH_GOVERNANCE_FILE: ${{ vars.UIP_GOVERNANCE_FILE }}
+  UIPATH_IGNORED_RULES: ${{ vars.UIP_IGNORED_RULES }}
   UIPATH_TELEMETRY_DISABLED: '1'
   UIPATH_CLI_NO_BROWSER: 'true'
 
@@ -130,6 +132,7 @@ jobs:
                  '--stopOnRuleViolation',
                  '--resultPath', $result)
           if ($env:UIPATH_GOVERNANCE_FILE) { $a += @('--governanceFilePath', (Join-Path $pwd $env:UIPATH_GOVERNANCE_FILE)) }
+          if ($env:UIPATH_IGNORED_RULES)   { $a += @('--ignoredRules', $env:UIPATH_IGNORED_RULES) }
 
           Write-Host "uipcli $($a -join ' ')"
           & $env:UIPCLI @a
