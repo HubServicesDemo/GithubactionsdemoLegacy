@@ -99,6 +99,7 @@ jobs:
               exit $code
             }
           }
+          exit 0   # reset the exit code left by the handled 409
 
       - name: Create or update process
         run: |
