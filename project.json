@@ -18,7 +18,10 @@
     "requiresUserInteraction": true,
     "supportsPersistence": false,
     "workflowSerialization": "DataContract",
-    "excludedLoggedData": ["Private:*", "*password*"],
+    "excludedLoggedData": [
+      "Private:*",
+      "*password*"
+    ],
     "executionType": "Workflow",
     "readyForPiP": false,
     "startsInPiP": false,
@@ -28,16 +31,27 @@
   "designOptions": {
     "projectProfile": "Developement",
     "outputType": "Process",
-    "libraryOptions": { "includeOriginalXaml": false, "privateWorkflows": [] },
-    "processOptions": { "ignoredFiles": [] },
+    "libraryOptions": {
+      "includeOriginalXaml": false,
+      "privateWorkflows": []
+    },
+    "processOptions": {
+      "ignoredFiles": []
+    },
     "fileInfoCollection": [],
     "modernBehavior": false
   },
   "expressionLanguage": "VisualBasic",
   "entryPoints": [
-    { "filePath": "Main.xaml", "uniqueId": "1feffd99-1202-4d4f-82c7-bcc98ba3ec69", "input": [], "output": [] }
+    {
+      "filePath": "Main.xaml",
+      "uniqueId": "1feffd99-1202-4d4f-82c7-bcc98ba3ec69",
+      "input": [],
+      "output": []
+    }
   ],
   "isTemplate": false,
   "templateProjectData": {},
-  "publishData": {}
+  "publishData": {},
+  "automationHubIdeaUrl": "https://staging.uipath.com/uipathtamindia/RamkrishnaK/automationhub_/automation-profile/uipath-package-deployment-assistant"
 }
