@@ -184,7 +184,9 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP 'package'
           $version = "1.0.${{ github.run_number }}"
           if ($env:PROJECT_TYPE -eq 'Legacy') {
-            uip rpa-legacy pack . -o $out --version $version
+            # Legacy packer needs an ABSOLUTE project path ("." causes "Invalid URI")
+            $proj = (Resolve-Path .).Path
+            uip rpa-legacy pack $proj -o $out --version $version
           } else {
             uip rpa pack . $out --package-version $version
           }
