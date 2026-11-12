@@ -1,0 +1,7 @@
+.local/
+.project/
+.settings/
+.tmh/
+.objects/
+.screenshots/
+~$*.xlsx

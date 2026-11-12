@@ -1,0 +1,43 @@
+{
+  "name": "LegacyDummy",
+  "description": "Windows - Legacy dummy project for CI/CD testing",
+  "main": "Main.xaml",
+  "dependencies": {
+    "UiPath.System.Activities": "[22.4.1]"
+  },
+  "webServices": [],
+  "entitiesStores": [],
+  "schemaVersion": "4.0",
+  "studioVersion": "22.4.0.0",
+  "projectVersion": "1.0.0",
+  "runtimeOptions": {
+    "autoDispose": false,
+    "netFrameworkLazyLoading": false,
+    "isPausable": true,
+    "isAttended": false,
+    "requiresUserInteraction": true,
+    "supportsPersistence": false,
+    "workflowSerialization": "DataContract",
+    "excludedLoggedData": ["Private:*", "*password*"],
+    "executionType": "Workflow",
+    "readyForPiP": false,
+    "startsInPiP": false,
+    "mustRestoreAllDependencies": true,
+    "pipType": "ChildSession"
+  },
+  "designOptions": {
+    "projectProfile": "Developement",
+    "outputType": "Process",
+    "libraryOptions": { "includeOriginalXaml": false, "privateWorkflows": [] },
+    "processOptions": { "ignoredFiles": [] },
+    "fileInfoCollection": [],
+    "modernBehavior": false
+  },
+  "expressionLanguage": "VisualBasic",
+  "entryPoints": [
+    { "filePath": "Main.xaml", "uniqueId": "1feffd99-1202-4d4f-82c7-bcc98ba3ec69", "input": [], "output": [] }
+  ],
+  "isTemplate": false,
+  "templateProjectData": {},
+  "publishData": {}
+}
