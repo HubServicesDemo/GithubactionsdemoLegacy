@@ -1,0 +1,122 @@
+# =============================================================================
+# Reusable deploy job - called by uipath-cicd.yml once per environment.
+#
+# Publishes the package built in the same run to ONE tenant and creates or
+# updates the process in that tenant's folder.
+#
+# Per-environment settings come from the GitHub Environment (Dev / Test / Prod):
+#   secrets   : UIP_CLIENT_ID, UIP_CLIENT_SECRET   (External Application of that tenant)
+#   variables : UIP_TENANT, UIP_FOLDER
+# =============================================================================
+
+name: UiPath deploy (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment name (Dev, Test or Prod)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ${{ vars.UIP_RUNNER || 'windows-latest' }}
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: uipath-deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      UIP_CLI_VERSION: '1.205.0'
+      UIPATH_AUTHORITY: ${{ vars.UIP_URL || 'https://cloud.uipath.com' }}
+      UIPATH_TENANT: ${{ vars.UIP_TENANT }}
+      UIPATH_FOLDER: ${{ vars.UIP_FOLDER }}
+      UIPATH_TELEMETRY_DISABLED: '1'
+      UIPATH_CLI_NO_BROWSER: 'true'
+    steps:
+      - name: Check configuration
+        env:
+          UIPATH_CLIENT_ID: ${{ secrets.UIP_CLIENT_ID }}
+          UIPATH_CLIENT_SECRET: ${{ secrets.UIP_CLIENT_SECRET }}
+        run: |
+          $missing = @()
+          if (-not $env:UIPATH_CLIENT_ID)     { $missing += 'secret UIP_CLIENT_ID' }
+          if (-not $env:UIPATH_CLIENT_SECRET) { $missing += 'secret UIP_CLIENT_SECRET' }
+          if (-not $env:UIPATH_TENANT)        { $missing += 'variable UIP_TENANT' }
+          if (-not $env:UIPATH_FOLDER)        { $missing += 'variable UIP_FOLDER' }
+          if ($missing) {
+            Write-Error "Environment '${{ inputs.environment }}' is missing: $($missing -join ', ')"
+            exit 1
+          }
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install new CLI (uip)
+        run: |
+          npm install -g "@uipath/cli@$env:UIP_CLI_VERSION"
+          uip --version
+
+      - name: Download package
+        uses: actions/download-artifact@v5
+        with:
+          name: package
+          path: ${{ runner.temp }}/package
+
+      - name: Log in to Orchestrator
+        env:
+          UIPATH_CLIENT_ID: ${{ secrets.UIP_CLIENT_ID }}
+          UIPATH_CLIENT_SECRET: ${{ secrets.UIP_CLIENT_SECRET }}
+        run: |
+          uip login --authority $env:UIPATH_AUTHORITY --tenant $env:UIPATH_TENANT --client-id env.UIPATH_CLIENT_ID --client-secret env.UIPATH_CLIENT_SECRET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish package
+        run: |
+          $pkg = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'package') -Filter *.nupkg | Select-Object -First 1
+          if (-not $pkg) { Write-Error "No .nupkg found"; exit 1 }
+          uip or packages upload $pkg.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create or update process
+        run: |
+          # Package id and version from the .nuspec inside the .nupkg
+          $pkg = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'package') -Filter *.nupkg | Select-Object -First 1
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($pkg.FullName)
+          $entry = $zip.Entries | Where-Object { $_.FullName -like '*.nuspec' } | Select-Object -First 1
+          $reader = New-Object System.IO.StreamReader($entry.Open())
+          [xml] $nuspec = $reader.ReadToEnd(); $reader.Close(); $zip.Dispose()
+          $id      = $nuspec.package.metadata.id
+          $version = $nuspec.package.metadata.version
+
+          $raw = uip or processes list --folder-path "$env:UIPATH_FOLDER" -n "$id" --output json
+          if ($LASTEXITCODE -ne 0) { $raw | Write-Host; exit $LASTEXITCODE }
+          $existing = (($raw -join "`n") | ConvertFrom-Json).Data | Where-Object { $_.Name -eq $id } | Select-Object -First 1
+
+          if ($existing) {
+            $action = 'Updated'
+            uip or processes update-version $existing.Key --package-version $version --folder-path "$env:UIPATH_FOLDER"
+          } else {
+            $action = 'Created'
+            uip or processes create --folder-path "$env:UIPATH_FOLDER" --name $id --package-key $id --package-version $version
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          @(
+            "### Deployed to ${{ inputs.environment }}",
+            "",
+            "| Package | Version | Folder | Action |",
+            "|---|---|---|---|",
+            "| $id | $version | $env:UIPATH_FOLDER | $action |"
+          ) | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Write-Host "$action process '$id' at version $version in '$env:UIPATH_FOLDER' (${{ inputs.environment }})"
