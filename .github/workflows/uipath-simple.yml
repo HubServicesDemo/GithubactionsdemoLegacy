@@ -67,10 +67,10 @@ jobs:
           Write-Host "Trigger: ${{ github.event_name }}   Stage: $env:STAGE   Project type: $env:PROJECT_TYPE"
 
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
 
@@ -108,7 +108,7 @@ jobs:
 
       # NEW CLI - used for everything else
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
 
@@ -166,7 +166,7 @@ jobs:
 
       - name: Save analyzer results
         if: always() && env.STAGE != '1-install'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: analyzer-results
           path: ${{ runner.temp }}/analyzer-results.json
@@ -195,7 +195,7 @@ jobs:
 
       - name: Save package
         if: env.STAGE != '1-install'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: package
           path: ${{ runner.temp }}/package/*.nupkg
