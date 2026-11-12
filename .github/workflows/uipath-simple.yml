@@ -1,0 +1,234 @@
+# Simple UiPath pipeline - hybrid CLI
+#   Analyze : OLD CLI (uipcli.exe)  - UiPath.CLI.Windows (Modern) or UiPath.CLI.Windows.Legacy (Legacy)
+#   Pack, login, publish, deploy : NEW CLI (uip)
+#
+# Runs AUTOMATICALLY on every push to main (does all stages up to 5-deploy).
+# Can also be run manually: Actions tab -> "UiPath simple test" -> Run workflow -> pick a stage.
+#
+#   1-install : install .NET 8, the old CLI and the new CLI, print their versions
+#   2-pack    : + analyze (old CLI) and build the .nupkg (new CLI)
+#   3-login   : + log in to Orchestrator
+#   4-publish : + upload the package to the Orchestrator tenant feed
+#   5-deploy  : + create the process in a folder, or update it to the new version
+#
+# TO BE FILLED (REPOSITORY level: Repo -> Settings -> Secrets and variables -> Actions):
+#   Variables : UIP_TENANT           = <tenant name>
+#               UIP_FOLDER           = <Orchestrator folder, e.g. Shared>
+#               UIP_PROJECT_TYPE     = Modern | Legacy   (optional, default Modern)
+#               UIPCLI_OLD_VERSION   = <optional: pin the old CLI version; empty = latest>
+#               UIP_GOVERNANCE_FILE  = <optional: path to a governance policy .json in the repo>
+#   Secrets   : UIP_CLIENT_ID        = <External App ID>
+#               UIP_CLIENT_SECRET    = <External App secret>
+
+name: UiPath simple test
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'              # editing a README does not start a build
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: How far to go
+        type: choice
+        default: 5-deploy
+        options: [1-install, 2-pack, 3-login, 4-publish, 5-deploy]
+
+permissions:
+  contents: read
+
+env:
+  # Manual run: the stage you picked. Automatic run (push): 5-deploy.
+  STAGE: ${{ inputs.stage || '5-deploy' }}
+  PROJECT_TYPE: ${{ vars.UIP_PROJECT_TYPE || 'Modern' }}
+  UIP_CLI_VERSION: 1.205.0                                  # new CLI (npm)
+  UIPCLI_OLD_VERSION: ${{ vars.UIPCLI_OLD_VERSION }}        # old CLI (NuGet), empty = latest
+  UIPATH_FEED: https://uipath.pkgs.visualstudio.com/Public.Feeds/_packaging/UiPath-Official/nuget/v3/index.json
+  UIPATH_AUTHORITY: https://staging.uipath.com
+  UIPATH_TENANT: ${{ vars.UIP_TENANT }}
+  UIPATH_FOLDER: ${{ vars.UIP_FOLDER }}
+  UIPATH_GOVERNANCE_FILE: ${{ vars.UIP_GOVERNANCE_FILE }}
+  UIPATH_TELEMETRY_DISABLED: '1'
+  UIPATH_CLI_NO_BROWSER: 'true'
+
+jobs:
+  run:
+    runs-on: windows-latest      # at IAG: shared-github-windows-latest-small
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # ---------- Stage 1: install ----------
+      - name: Show what this run will do
+        run: |
+          Write-Host "Trigger: ${{ github.event_name }}   Stage: $env:STAGE   Project type: $env:PROJECT_TYPE"
+
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # OLD CLI - used ONLY for Analyze
+      - name: Install old CLI (uipcli)
+        run: |
+          $pkgName = if ($env:PROJECT_TYPE -eq 'Legacy') { 'UiPath.CLI.Windows.Legacy' } else { 'UiPath.CLI.Windows' }
+          $dir = Join-Path $env:RUNNER_TEMP 'uipcli'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+
+          # The CLI is published as a .NET tool, so install it with "dotnet tool install"
+          $toolArgs = @('tool', 'install', $pkgName, '--tool-path', $dir, '--add-source', $env:UIPATH_FEED)
+          if ($env:UIPCLI_OLD_VERSION) { $toolArgs += @('--version', $env:UIPCLI_OLD_VERSION) }
+          Write-Host "dotnet $($toolArgs -join ' ')"
+          dotnet @toolArgs
+
+          if ($LASTEXITCODE -ne 0) {
+            # Fallback for packages that are NOT a .NET tool: plain NuGet download
+            Write-Host "dotnet tool install failed - trying plain NuGet download"
+            Invoke-WebRequest https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -OutFile "$dir\nuget.exe"
+            $nugetArgs = @('install', $pkgName, '-Source', $env:UIPATH_FEED, '-OutputDirectory', $dir, '-NonInteractive')
+            if ($env:UIPCLI_OLD_VERSION) { $nugetArgs += @('-Version', $env:UIPCLI_OLD_VERSION) }
+            & "$dir\nuget.exe" @nugetArgs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          # Find the executable (tool shim in $dir, or uipcli.exe inside the package)
+          $exe = Get-ChildItem $dir -Recurse -Filter uipcli.exe | Select-Object -First 1
+          if (-not $exe) { $exe = Get-ChildItem $dir -Filter *.exe | Where-Object Name -ne 'nuget.exe' | Select-Object -First 1 }
+          if (-not $exe) { Get-ChildItem $dir -Recurse | Select-Object -First 50 FullName | Write-Host; Write-Error "uipcli executable not found"; exit 1 }
+          "UIPCLI=$($exe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          dotnet tool list --tool-path $dir
+          Write-Host "Old CLI exe : $($exe.FullName)   <- note the version above to pin it later"
+
+      # NEW CLI - used for everything else
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install new CLI (uip)
+        run: |
+          npm install -g "@uipath/cli@$env:UIP_CLI_VERSION"
+          uip --version
+
+      # ---------- Stage 2: analyze (old CLI) + pack (new CLI) ----------
+      # Workflow Analyzer. If it finds errors, the run stops here
+      # and nothing is packed or deployed.
+      - name: Analyze project (old CLI)
+        if: env.STAGE != '1-install'
+        run: |
+          $result = Join-Path $env:RUNNER_TEMP 'analyzer-results.json'
+          $a = @('package', 'analyze', (Join-Path $pwd 'project.json'),
+                 '--analyzerTraceLevel', 'Error',
+                 '--resultPath', $result)
+          if ($env:UIPATH_GOVERNANCE_FILE) { $a += @('--governanceFilePath', (Join-Path $pwd $env:UIPATH_GOVERNANCE_FILE)) }
+
+          Write-Host "uipcli $($a -join ' ')"
+          & $env:UIPCLI @a
+          $code = $LASTEXITCODE
+
+          if (Test-Path $result) { Write-Host "---- Analyzer results ----"; Get-Content $result | Write-Host }
+          if ($code -ne 0) {
+            Write-Host "---- Analyze failed (exit $code). Options for this CLI version: ----"
+            & $env:UIPCLI package analyze --help
+            exit $code
+          }
+
+      - name: Save analyzer results
+        if: always() && env.STAGE != '1-install'
+        uses: actions/upload-artifact@v4
+        with:
+          name: analyzer-results
+          path: ${{ runner.temp }}/analyzer-results.json
+          if-no-files-found: ignore
+
+      # Output must be OUTSIDE the project folder, so use the runner's temp folder.
+      - name: Pack project (new CLI)
+        if: env.STAGE != '1-install'
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'package'
+          $version = "1.0.${{ github.run_number }}"
+          if ($env:PROJECT_TYPE -eq 'Legacy') {
+            uip rpa-legacy pack . -o $out --version $version
+          } else {
+            uip rpa pack . $out --package-version $version
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem $out
+
+      - name: Save package
+        if: env.STAGE != '1-install'
+        uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: ${{ runner.temp }}/package/*.nupkg
+
+      # ---------- Stage 3: login (new CLI) ----------
+      - name: Check secrets are visible
+        if: contains(fromJSON('["3-login","4-publish","5-deploy"]'), env.STAGE)
+        env:
+          UIPATH_CLIENT_ID: ${{ secrets.UIP_CLIENT_ID }}
+          UIPATH_CLIENT_SECRET: ${{ secrets.UIP_CLIENT_SECRET }}
+        run: |
+          Write-Host "CLIENT_ID length:     $($env:UIPATH_CLIENT_ID.Length)"
+          Write-Host "CLIENT_SECRET length: $($env:UIPATH_CLIENT_SECRET.Length)"
+          Write-Host "TENANT:               $env:UIPATH_TENANT"
+          if (-not $env:UIPATH_CLIENT_ID -or -not $env:UIPATH_CLIENT_SECRET -or -not $env:UIPATH_TENANT) {
+            Write-Error "A secret or variable is empty. Add UIP_CLIENT_ID, UIP_CLIENT_SECRET (secrets) and UIP_TENANT (variable) at REPOSITORY level."
+            exit 1
+          }
+
+      - name: Log in to Orchestrator
+        if: contains(fromJSON('["3-login","4-publish","5-deploy"]'), env.STAGE)
+        env:
+          UIPATH_CLIENT_ID: ${{ secrets.UIP_CLIENT_ID }}
+          UIPATH_CLIENT_SECRET: ${{ secrets.UIP_CLIENT_SECRET }}
+        run: |
+          uip login --authority $env:UIPATH_AUTHORITY --tenant $env:UIPATH_TENANT --client-id env.UIPATH_CLIENT_ID --client-secret env.UIPATH_CLIENT_SECRET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uip login status
+
+      # ---------- Stage 4: publish (new CLI) ----------
+      - name: Upload package to Orchestrator
+        if: contains(fromJSON('["4-publish","5-deploy"]'), env.STAGE)
+        run: |
+          $pkg = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'package') -Filter *.nupkg | Select-Object -First 1
+          if (-not $pkg) { Write-Error "No .nupkg found"; exit 1 }
+          uip or packages upload $pkg.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ---------- Stage 5: deploy (new CLI) ----------
+      - name: Create or update process
+        if: env.STAGE == '5-deploy'
+        run: |
+          if (-not $env:UIPATH_FOLDER) { Write-Error "Add the repository variable UIP_FOLDER (e.g. Shared)"; exit 1 }
+
+          # Read package id and version from the .nuspec inside the .nupkg
+          $pkg = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'package') -Filter *.nupkg | Select-Object -First 1
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($pkg.FullName)
+          $entry = $zip.Entries | Where-Object { $_.FullName -like '*.nuspec' } | Select-Object -First 1
+          $reader = New-Object System.IO.StreamReader($entry.Open())
+          [xml] $nuspec = $reader.ReadToEnd(); $reader.Close(); $zip.Dispose()
+          $id      = $nuspec.package.metadata.id
+          $version = $nuspec.package.metadata.version
+          Write-Host "Package id: $id   version: $version   folder: $env:UIPATH_FOLDER"
+
+          # Does a process with this name already exist in the folder?
+          $raw = uip or processes list --folder-path "$env:UIPATH_FOLDER" -n "$id" --output json
+          if ($LASTEXITCODE -ne 0) { $raw; exit $LASTEXITCODE }
+          Write-Host "processes list output:"; Write-Host ($raw -join "`n")
+          $existing = (($raw -join "`n") | ConvertFrom-Json).Data | Where-Object { $_.Name -eq $id } | Select-Object -First 1
+
+          if ($existing) {
+            Write-Host "Process exists (key $($existing.Key)) - updating to $version"
+            uip or processes update-version $existing.Key --package-version $version --folder-path "$env:UIPATH_FOLDER"
+          } else {
+            Write-Host "Process not found - creating it"
+            uip or processes create --folder-path "$env:UIPATH_FOLDER" --name $id --package-key $id --package-version $version
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
