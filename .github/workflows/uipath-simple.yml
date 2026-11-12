@@ -176,6 +176,11 @@ jobs:
       - name: Pack project (new CLI)
         if: env.STAGE != '1-install'
         run: |
+          # uip rpa-legacy runs the old uipcli engine internally. That engine crashes on
+          # UIPATH_TELEMETRY_DISABLED=1, so remove the variable for this step only.
+          Remove-Item Env:UIPATH_TELEMETRY_DISABLED -ErrorAction SilentlyContinue
+          Write-Host "UIPATH_TELEMETRY_DISABLED in this step: '$env:UIPATH_TELEMETRY_DISABLED'"
+
           $out = Join-Path $env:RUNNER_TEMP 'package'
           $version = "1.0.${{ github.run_number }}"
           if ($env:PROJECT_TYPE -eq 'Legacy') {
