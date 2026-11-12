@@ -127,9 +127,10 @@ jobs:
           UIPATH_TELEMETRY_DISABLED: 'true'
         run: |
           $result = Join-Path $env:RUNNER_TEMP 'analyzer-results.json'
+          # The CLI only REPORTS here; the pass/fail decision is made below,
+          # so ignored rules are always respected.
           $a = @('package', 'analyze', (Join-Path $pwd 'project.json'),
                  '--analyzerTraceLevel', 'Error',
-                 '--stopOnRuleViolation',
                  '--resultPath', $result)
           if ($env:UIPATH_GOVERNANCE_FILE) { $a += @('--governanceFilePath', (Join-Path $pwd $env:UIPATH_GOVERNANCE_FILE)) }
           if ($env:UIPATH_IGNORED_RULES)   { $a += @('--ignoredRules', $env:UIPATH_IGNORED_RULES) }
@@ -138,12 +139,30 @@ jobs:
           & $env:UIPCLI @a
           $code = $LASTEXITCODE
 
-          if (Test-Path $result) { Write-Host "---- Analyzer results ----"; Get-Content $result | Write-Host }
-          if ($code -ne 0) {
-            Write-Host "---- Analyze failed (exit $code). Options for this CLI version: ----"
+          if (-not (Test-Path $result)) {
+            Write-Host "---- Analyzer produced no results file (exit $code). Options for this CLI version: ----"
             & $env:UIPCLI package analyze --help
-            exit $code
+            exit 1
           }
+
+          # ---- The gate: fail on any Error-level finding that is not ignored ----
+          # ErrorSeverity: 1 = Error, 2 = Warning, 3 = Info
+          $ignored  = @("$env:UIPATH_IGNORED_RULES".Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          $findings = @(Get-Content $result -Raw | ConvertFrom-Json)
+          $errors   = @($findings | Where-Object { $_.ErrorSeverity -eq 1 -and $ignored -notcontains $_.ErrorCode })
+
+          Write-Host "---- Analyzer results ----"
+          $findings | ForEach-Object {
+            $lvl = switch ($_.ErrorSeverity) { 1 {'ERROR'} 2 {'WARN '} default {'INFO '} }
+            $tag = if ($ignored -contains $_.ErrorCode) { ' (ignored)' } else { '' }
+            Write-Host ("{0}  {1}  {2}  {3}{4}" -f $lvl, $_.ErrorCode, $_.RuleName, $_.ActivityDisplayName, $tag)
+          }
+
+          if ($errors.Count -gt 0) {
+            Write-Error "Workflow Analyzer gate FAILED: $($errors.Count) error(s): $(($errors.ErrorCode | Select-Object -Unique) -join ', ')"
+            exit 1
+          }
+          Write-Host "Workflow Analyzer gate PASSED (no Error-level findings)."
 
       - name: Save analyzer results
         if: always() && env.STAGE != '1-install'
