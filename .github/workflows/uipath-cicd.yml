@@ -1,0 +1,192 @@
+# =============================================================================
+# UiPath CI/CD pipeline - Windows - Legacy projects
+#
+#   build  : analyze (Workflow Analyzer gate) -> pack            (once per run)
+#   Dev    : publish + deploy the SAME package to the Dev tenant  (automatic)
+#   Test   : publish + deploy the SAME package to the Test tenant (automatic)
+#   Prod   : publish + deploy the SAME package to the Prod tenant (needs approval)
+#
+# Triggers
+#   pull_request to main : build only (the analyzer result is the PR check)
+#   push to main         : build -> Dev -> Test -> [approval] -> Prod
+#   manual (Run workflow): same as push
+#
+# CLIs
+#   Analyze : UiPath.CLI.Windows.Legacy (uipcli)  - uip rpa-legacy has no analyze
+#   Pack    : uip rpa-legacy pack
+#   Deploy  : uip or packages / uip or processes  (see uipath-deploy.yml)
+#
+# Configuration: see README.md. Nothing secret is stored in this file.
+# =============================================================================
+
+name: UiPath CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uipath-cicd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UIP_CLI_VERSION: '1.205.0'                          # new CLI (npm @uipath/cli) - pinned
+  UIPCLI_OLD_VERSION: ${{ vars.UIPCLI_OLD_VERSION }}  # old CLI (NuGet), empty = latest
+  UIPATH_FEED: https://uipath.pkgs.visualstudio.com/Public.Feeds/_packaging/UiPath-Official/nuget/v3/index.json
+  UIPATH_GOVERNANCE_FILE: ${{ vars.UIP_GOVERNANCE_FILE }}
+  UIPATH_IGNORED_RULES: ${{ vars.UIP_IGNORED_RULES }}
+  UIPATH_TELEMETRY_DISABLED: '1'
+  UIPATH_CLI_NO_BROWSER: 'true'
+
+jobs:
+  # ===========================================================================
+  # BUILD - analyze + pack. No Orchestrator login, no secrets.
+  # ===========================================================================
+  build:
+    runs-on: ${{ vars.UIP_RUNNER || 'windows-latest' }}
+    defaults:
+      run:
+        shell: pwsh
+    outputs:
+      package_version: ${{ steps.pack.outputs.package_version }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install old CLI (UiPath.CLI.Windows.Legacy)
+        run: |
+          $pkg = 'UiPath.CLI.Windows.Legacy'
+          $dir = Join-Path $env:RUNNER_TEMP 'uipcli'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+
+          $toolArgs = @('tool', 'install', $pkg, '--tool-path', $dir, '--add-source', $env:UIPATH_FEED)
+          if ($env:UIPCLI_OLD_VERSION) { $toolArgs += @('--version', $env:UIPCLI_OLD_VERSION) }
+          dotnet @toolArgs
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "dotnet tool install failed - falling back to NuGet download"
+            Invoke-WebRequest https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -OutFile "$dir\nuget.exe"
+            $nugetArgs = @('install', $pkg, '-Source', $env:UIPATH_FEED, '-OutputDirectory', $dir, '-NonInteractive')
+            if ($env:UIPCLI_OLD_VERSION) { $nugetArgs += @('-Version', $env:UIPCLI_OLD_VERSION) }
+            & "$dir\nuget.exe" @nugetArgs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          $exe = Get-ChildItem $dir -Recurse -Filter uipcli.exe | Select-Object -First 1
+          if (-not $exe) { $exe = Get-ChildItem $dir -Filter *.exe | Where-Object Name -ne 'nuget.exe' | Select-Object -First 1 }
+          if (-not $exe) { Write-Error "uipcli executable not found"; exit 1 }
+          "UIPCLI=$($exe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          dotnet tool list --tool-path $dir
+
+      - name: Install new CLI (uip)
+        run: |
+          npm install -g "@uipath/cli@$env:UIP_CLI_VERSION"
+          uip --version
+
+      # ---------------- Workflow Analyzer gate ----------------
+      - name: Analyze (Workflow Analyzer gate)
+        env:
+          UIPATH_TELEMETRY_DISABLED: 'true'     # old CLI accepts only true/false
+        run: |
+          $result = Join-Path $env:RUNNER_TEMP 'analyzer-results.json'
+          $a = @('package', 'analyze', (Join-Path $pwd 'project.json'),
+                 '--analyzerTraceLevel', 'Error',
+                 '--resultPath', $result)
+          if ($env:UIPATH_GOVERNANCE_FILE) { $a += @('--governanceFilePath', (Join-Path $pwd $env:UIPATH_GOVERNANCE_FILE)) }
+          if ($env:UIPATH_IGNORED_RULES)   { $a += @('--ignoredRules', $env:UIPATH_IGNORED_RULES) }
+
+          & $env:UIPCLI @a
+          if (-not (Test-Path $result)) { Write-Error "Analyzer produced no results (exit $LASTEXITCODE)"; exit 1 }
+
+          # Gate: fail on any Error-level finding that is not ignored (1=Error 2=Warning 3=Info)
+          $ignored  = @("$env:UIPATH_IGNORED_RULES".Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          $findings = @(Get-Content $result -Raw | ConvertFrom-Json)
+          $errors   = @($findings | Where-Object { $_.ErrorSeverity -eq 1 -and $ignored -notcontains $_.ErrorCode })
+
+          $summary = @('### Workflow Analyzer', '', '| Level | Rule | Name | Activity |', '|---|---|---|---|')
+          foreach ($f in $findings) {
+            $lvl = switch ($f.ErrorSeverity) { 1 {'Error'} 2 {'Warning'} default {'Info'} }
+            if ($ignored -contains $f.ErrorCode) { $lvl = "$lvl (ignored)" }
+            Write-Host ("{0,-16} {1,-12} {2} {3}" -f $lvl, $f.ErrorCode, $f.RuleName, $f.ActivityDisplayName)
+            $summary += "| $lvl | $($f.ErrorCode) | $($f.RuleName) | $($f.ActivityDisplayName) |"
+          }
+          $summary | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+          if ($errors.Count -gt 0) {
+            Write-Error "Workflow Analyzer gate FAILED: $(($errors.ErrorCode | Select-Object -Unique) -join ', ')"
+            exit 1
+          }
+          Write-Host "Workflow Analyzer gate PASSED"
+
+      - name: Save analyzer results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: analyzer-results
+          path: ${{ runner.temp }}/analyzer-results.json
+          if-no-files-found: ignore
+
+      # ---------------- Pack (once) ----------------
+      - name: Pack (uip rpa-legacy)
+        id: pack
+        run: |
+          # The legacy packer runs the old engine internally, which rejects UIPATH_TELEMETRY_DISABLED=1
+          Remove-Item Env:UIPATH_TELEMETRY_DISABLED -ErrorAction SilentlyContinue
+
+          $out     = Join-Path $env:RUNNER_TEMP 'package'
+          $version = "1.0.${{ github.run_number }}"
+          $proj    = (Resolve-Path .).Path          # absolute path required
+          uip rpa-legacy pack $proj -o $out --version $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Get-ChildItem $out
+          "package_version=$version" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Save package
+        uses: actions/upload-artifact@v5
+        with:
+          name: package
+          path: ${{ runner.temp }}/package/*.nupkg
+          retention-days: 30
+
+  # ===========================================================================
+  # PROMOTION - the same package, tenant by tenant
+  # ===========================================================================
+  deploy-dev:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/uipath-deploy.yml
+    with:
+      environment: Dev
+    secrets: inherit
+
+  deploy-test:
+    needs: deploy-dev
+    uses: ./.github/workflows/uipath-deploy.yml
+    with:
+      environment: Test
+    secrets: inherit
+
+  deploy-prod:
+    needs: deploy-test
+    uses: ./.github/workflows/uipath-deploy.yml   # Prod environment has Required reviewers = approval gate
+    with:
+      environment: Prod
+    secrets: inherit
